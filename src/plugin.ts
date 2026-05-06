@@ -3,6 +3,8 @@ import { UserStore, tachiAuthUrl, tachiExchangeCode, lastfmAuthUrl, lastfmExchan
 import { syncUser } from "./syncer";
 
 export interface ScrobblerPluginConfig {
+  redirectUri: string;
+
   tachiClientId: string;
   tachiClientSecret: string;
 
@@ -29,11 +31,8 @@ export function tachiScrobblerPlugin(config: ScrobblerPluginConfig) {
     const users = store.getAll().filter((u) => u.lastfmSessionKey);
     if (users.length === 0) return;
 
-    console.log(`[scrobbler] syncing ${users.length} users`)
-
     for (const user of users) {
       try {
-        console.log(`[scrobbler] syncing user ${user.tachiUsername}`)
         const result = await syncUser(
           {
             tachiToken: user.tachiToken,
@@ -69,14 +68,57 @@ export function tachiScrobblerPlugin(config: ScrobblerPluginConfig) {
         tachiUsername: u.tachiUsername,
         lastfmUsername: u.lastfmUsername ?? null,
         connected: !!u.lastfmSessionKey,
+        syncing: u.syncing,
         lastSyncedAt: u.lastSyncedAt,
       }));
       return { ok: true, users };
     })
 
+    .get("/status/:id", ({ query, set }) => {
+      const uuid = query.uuid as string | undefined;
+      if (!uuid) {
+        set.status = 400;
+        return { error: "Missing UUID parameter" };
+      }
+
+      const existing = store.getByUUID(uuid);
+      if (!existing) {
+        set.status = 400;
+        return { error: "Invalid user" };
+      }
+
+      const user = {
+        tachiUsername: existing.tachiUsername,
+        lastfmUsername: existing.lastfmUsername ?? null,
+        connected: !!existing.lastfmSessionKey,
+        syncing: existing.syncing,
+        lastSyncedAt: existing.lastSyncedAt,
+      };
+
+      return user;
+    })
+
     .get("/connect/tachi", ({ redirect }) => {
       const url = tachiAuthUrl(config.tachiClientId, config.tachiWebBaseUrl);
       return redirect(url)
+    })
+
+    .get("/disconnect", ({ query, set, redirect }) => {
+      const uuid = query.uuid as string | undefined;
+      if (!uuid) {
+        set.status = 400;
+        return { error: "Missing UUID parameter" };
+      }
+
+      const existing = store.getByUUID(uuid);
+      if (existing) {
+        store.removeByUUID(uuid);
+      } else {
+        set.status = 400;
+        return { error: "Invalid user" };
+      }
+
+      return redirect(`${config.redirectUri}`);
     })
 
     .get("/callback/tachi", async ({ query, set, redirect }) => {
@@ -114,6 +156,8 @@ export function tachiScrobblerPlugin(config: ScrobblerPluginConfig) {
         lastfmUsername: existing?.lastfmUsername,
         lastSyncedAt: existing?.lastSyncedAt ?? 0,
         createdAt: existing?.createdAt ?? new Date().toISOString(),
+        serverUUID: existing?.serverUUID ?? crypto.randomUUID(),
+        syncing: existing?.syncing ?? true,
       });
 
       const lfmUrl = lastfmAuthUrl({
@@ -160,6 +204,9 @@ export function tachiScrobblerPlugin(config: ScrobblerPluginConfig) {
       });
 
       console.log(`[scrobbler] ${user.tachiUsername} → linked Last.fm: ${lastfmUsername}`);
-      redirect()
+      const sp   = new URLSearchParams({
+        uuid: user.serverUUID,
+      })
+      return redirect(`${config.redirectUri}?${sp.toString()}`);
     });
 }

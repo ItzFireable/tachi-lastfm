@@ -192,9 +192,6 @@ export async function syncUser(
     }
   }
 
-  console.log("guh")
-  console.log(allNewScores.length)
-
   if (allNewScores.length === 0) {
     return { scrobbled: 0, ignored: 0, gamesChecked: games.length, newState: state };
   }

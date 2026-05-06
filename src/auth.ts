@@ -9,6 +9,8 @@ export interface UserRecord {
   lastfmUsername?: string;
   lastSyncedAt: number;
   createdAt: string;
+  serverUUID: string;
+  syncing: boolean;
 }
 
 export class UserStore {
@@ -41,8 +43,22 @@ export class UserStore {
     return this.users.get(tachiUserId);
   }
 
+  getByUUID(uuid: string): UserRecord | undefined {
+    return Array.from(this.users.values()).find((u) => u.serverUUID === uuid);
+  }
+
   getAll(): UserRecord[] {
     return [...this.users.values()];
+  }
+
+  async removeByUUID(uuid: string): Promise<boolean> {
+    const user = this.getByUUID(uuid);
+    if (user) {
+      this.users.delete(user.tachiUserId);
+      await this.save();
+      return true;
+    }
+    return false;
   }
 
   async upsert(record: UserRecord): Promise<void> {
