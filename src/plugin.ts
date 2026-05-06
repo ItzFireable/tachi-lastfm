@@ -52,6 +52,7 @@ export function tachiScrobblerPlugin(config: ScrobblerPluginConfig) {
         }
       } catch (err) {
         console.error(`[scrobbler] Error syncing ${user.tachiUsername}:`, err);
+        continue;
       }
     }
   }
