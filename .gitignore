@@ -1,0 +1,4 @@
+node_modules/
+.env
+.scrobbler-users.json
+bun.lock
