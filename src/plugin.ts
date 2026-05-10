@@ -1,5 +1,5 @@
 import Elysia from "elysia";
-import { UserStore, tachiAuthUrl, tachiExchangeCode, lastfmAuthUrl, lastfmExchangeToken } from "./auth";
+import { IUserStore, createUserStore, tachiAuthUrl, tachiExchangeCode, lastfmAuthUrl, lastfmExchangeToken } from "./auth";
 import { syncUser } from "./syncer";
 
 export interface ScrobblerPluginConfig {
@@ -17,18 +17,23 @@ export interface ScrobblerPluginConfig {
   lastfmCallbackUrl: string;
 
   intervalMs?: number;
+
+  sqlConnectionString?: string;
   storageFile?: string;
 }
 
 export function tachiScrobblerPlugin(config: ScrobblerPluginConfig) {
   const intervalMs = config.intervalMs ?? 5 * 60 * 1000;
-  const storageFile = config.storageFile ?? ".scrobbler-users.json";
 
-  const store = new UserStore(storageFile);
+  const store: IUserStore = createUserStore({
+    sqlConnectionString: config.sqlConnectionString,
+    storageFile: config.storageFile,
+  });
+
   const pendingLastfm = new Map<number, number>();
 
   async function syncAll() {
-    const users = store.getAll().filter((u) => u.lastfmSessionKey);
+    const users = (await store.getAll()).filter((u) => u.lastfmSessionKey);
     if (users.length === 0) return;
 
     for (const user of users) {
@@ -57,15 +62,16 @@ export function tachiScrobblerPlugin(config: ScrobblerPluginConfig) {
     }
   }
 
-  store.load().then(() => {
-    console.log(`[scrobbler] Loaded ${store.getAll().length} user(s). Interval: ${intervalMs / 1000}s`);
+  store.load().then(async () => {
+    const all = await store.getAll();
+    console.log(`[scrobbler] Loaded ${all.length} user(s). Interval: ${intervalMs / 1000}s`);
     syncAll();
     setInterval(syncAll, intervalMs);
   });
 
   return new Elysia({ prefix: "/scrobbler" })
-    .get("/status", () => {
-      const users = store.getAll().map((u) => ({
+    .get("/status", async () => {
+      const users = (await store.getAll()).map((u) => ({
         tachiUsername: u.tachiUsername,
         lastfmUsername: u.lastfmUsername ?? null,
         connected: !!u.lastfmSessionKey,
@@ -75,14 +81,14 @@ export function tachiScrobblerPlugin(config: ScrobblerPluginConfig) {
       return { ok: true, users };
     })
 
-    .get("/status/:id", ({ query, set }) => {
+    .get("/status/:id", async ({ query, set }) => {
       const uuid = query.uuid as string | undefined;
       if (!uuid) {
         set.status = 400;
         return { error: "Missing UUID parameter" };
       }
 
-      const existing = store.getByUUID(uuid);
+      const existing = await store.getByUUID(uuid);
       if (!existing) {
         set.status = 400;
         return { error: "Invalid user" };
@@ -104,16 +110,16 @@ export function tachiScrobblerPlugin(config: ScrobblerPluginConfig) {
       return redirect(url)
     })
 
-    .get("/disconnect", ({ query, set, redirect }) => {
+    .get("/disconnect", async ({ query, set, redirect }) => {
       const uuid = query.uuid as string | undefined;
       if (!uuid) {
         set.status = 400;
         return { error: "Missing UUID parameter" };
       }
 
-      const existing = store.getByUUID(uuid);
+      const existing = await store.getByUUID(uuid);
       if (existing) {
-        store.removeByUUID(uuid);
+        await store.removeByUUID(uuid);
       } else {
         set.status = 400;
         return { error: "Invalid user" };
@@ -148,7 +154,7 @@ export function tachiScrobblerPlugin(config: ScrobblerPluginConfig) {
         return { error: `Tachi auth failed: ${(err as Error).message}` };
       }
 
-      const existing = store.get(tachiUserId);
+      const existing = await store.get(tachiUserId);
       await store.upsert({
         tachiUserId,
         tachiUsername,
@@ -177,7 +183,7 @@ export function tachiScrobblerPlugin(config: ScrobblerPluginConfig) {
         return { error: "Missing token or tachiId parameter" };
       }
 
-      const user = store.get(tachiId);
+      const user = await store.get(tachiId);
       if (!user) {
         set.status = 404;
         return { error: "Unknown tachiId — complete the Tachi step first" };
