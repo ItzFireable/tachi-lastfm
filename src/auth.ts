@@ -1,6 +1,5 @@
 import * as crypto from "crypto";
 import { readFile, writeFile } from "fs/promises";
-import sql from "mssql";
 
 export interface UserRecord {
   tachiUserId: number;
@@ -86,153 +85,163 @@ export class UserStore implements IUserStore {
   }
 }
 
-const CREATE_TABLE_SQL = `
-IF NOT EXISTS (
-  SELECT * FROM sysobjects WHERE name='scrobbler_users' AND xtype='U'
-)
-CREATE TABLE scrobbler_users (
-  tachi_user_id      INT            NOT NULL PRIMARY KEY,
-  tachi_username     NVARCHAR(255)  NOT NULL,
-  tachi_token        NVARCHAR(2000) NOT NULL,
-  lastfm_session_key NVARCHAR(255)  NULL,
-  lastfm_username    NVARCHAR(255)  NULL,
-  last_synced_at     BIGINT         NOT NULL DEFAULT 0,
-  created_at         NVARCHAR(50)   NOT NULL,
-  server_uuid        NVARCHAR(36)   NOT NULL,
-  syncing            BIT            NOT NULL DEFAULT 1
-);
-`;
-
-function rowToRecord(row: Record<string, unknown>): UserRecord {
+function parseBlobConnectionString(cs: string): {
+  accountName: string;
+  accountKey: string;
+  endpointSuffix: string;
+} {
+  const get = (key: string) => {
+    const match = cs.match(new RegExp(`${key}=([^;]+)`));
+    if (!match) throw new Error(`BlobUserStore: missing ${key} in connection string`);
+    return match[1];
+  };
   return {
-    tachiUserId:      row.tachi_user_id as number,
-    tachiUsername:    row.tachi_username as string,
-    tachiToken:       row.tachi_token as string,
-    lastfmSessionKey: (row.lastfm_session_key as string | null) ?? undefined,
-    lastfmUsername:   (row.lastfm_username as string | null) ?? undefined,
-    lastSyncedAt:     Number(row.last_synced_at),
-    createdAt:        row.created_at as string,
-    serverUUID:       row.server_uuid as string,
-    syncing:          row.syncing === true || row.syncing === 1,
+    accountName:    get("AccountName"),
+    accountKey:     get("AccountKey"),
+    endpointSuffix: get("EndpointSuffix") ?? "core.windows.net",
   };
 }
 
-export class SqlUserStore implements IUserStore {
-  private pool: sql.ConnectionPool | null = null;
-  private readonly connectionString: string;
+async function blobSharedKeyHeaders(
+  accountName: string,
+  accountKey: string,
+  method: string,
+  containerName: string,
+  blobName: string,
+  body?: string
+): Promise<Record<string, string>> {
+  const dateStr     = new Date().toUTCString();
+  const contentType = body !== undefined ? "application/json" : "";
+  const contentLen  = body !== undefined ? String(Buffer.byteLength(body, "utf-8")) : "";
 
-  constructor(connectionString: string) {
-    this.connectionString = connectionString;
+  const stringToSign = [
+    method.toUpperCase(),
+    "",           // Content-Encoding
+    "",           // Content-Language
+    contentLen,
+    "",           // Content-MD5
+    contentType,
+    "",           // Date (empty — using x-ms-date instead)
+    "", "", "", "", // If-* headers
+    "",           // Range
+    `x-ms-blob-type:BlockBlob\nx-ms-date:${dateStr}\nx-ms-version:2020-04-08`,
+    `/${accountName}/${containerName}/${blobName}`,
+  ].join("\n");
+
+  const keyBytes = Buffer.from(accountKey, "base64");
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+  );
+  const sig = Buffer.from(
+    await crypto.subtle.sign("HMAC", cryptoKey, Buffer.from(stringToSign, "utf-8"))
+  ).toString("base64");
+
+  const headers: Record<string, string> = {
+    "x-ms-date":      dateStr,
+    "x-ms-version":   "2020-04-08",
+    "x-ms-blob-type": "BlockBlob",
+    "Authorization":  `SharedKey ${accountName}:${sig}`,
+  };
+  if (body !== undefined) {
+    headers["Content-Type"]   = contentType;
+    headers["Content-Length"] = contentLen;
+  }
+  return headers;
+}
+
+export class BlobUserStore implements IUserStore {
+  private users: Map<number, UserRecord> = new Map();
+  private readonly accountName: string;
+  private readonly accountKey: string;
+  private readonly endpointSuffix: string;
+  private readonly containerName: string;
+  private readonly blobName: string;
+
+  constructor(connectionString: string, containerName = "scrobbler", blobName = "users.json") {
+    const parsed        = parseBlobConnectionString(connectionString);
+    this.accountName    = parsed.accountName;
+    this.accountKey     = parsed.accountKey;
+    this.endpointSuffix = parsed.endpointSuffix;
+    this.containerName  = containerName;
+    this.blobName       = blobName;
+  }
+
+  private get blobUrl(): string {
+    return `https://${this.accountName}.blob.${this.endpointSuffix}/${this.containerName}/${this.blobName}`;
   }
 
   async load(): Promise<void> {
-    this.pool = await sql.connect(this.connectionString);
-    await this.pool.request().query(CREATE_TABLE_SQL);
-    console.log("[scrobbler] Connected to Azure SQL — scrobbler_users table ready");
+    const res = await fetch(this.blobUrl, {
+      method: "GET",
+      headers: await blobSharedKeyHeaders(this.accountName, this.accountKey, "GET", this.containerName, this.blobName),
+    });
+    if (res.status === 404) { this.users = new Map(); return; }
+    if (!res.ok) throw new Error(`Blob GET failed: ${res.status} ${await res.text()}`);
+    const arr = (await res.json()) as UserRecord[];
+    this.users = new Map(arr.map((u) => [u.tachiUserId, u]));
   }
 
-  /** No-op: SQL writes are committed immediately in each method. */
-  async save(): Promise<void> {}
-
-  private get db(): sql.ConnectionPool {
-    if (!this.pool) throw new Error("[scrobbler] SqlUserStore.load() has not been called");
-    return this.pool;
+  async save(): Promise<void> {
+    const body = JSON.stringify([...this.users.values()], null, 2);
+    const res = await fetch(this.blobUrl, {
+      method: "PUT",
+      headers: await blobSharedKeyHeaders(this.accountName, this.accountKey, "PUT", this.containerName, this.blobName, body),
+      body,
+    });
+    if (!res.ok) throw new Error(`Blob PUT failed: ${res.status} ${await res.text()}`);
   }
 
   async get(tachiUserId: number): Promise<UserRecord | undefined> {
-    const result = await this.db
-      .request()
-      .input("id", sql.Int, tachiUserId)
-      .query("SELECT * FROM scrobbler_users WHERE tachi_user_id = @id");
-    if (!result.recordset.length) return undefined;
-    return rowToRecord(result.recordset[0]);
+    return this.users.get(tachiUserId);
   }
 
   async getByUUID(uuid: string): Promise<UserRecord | undefined> {
-    const result = await this.db
-      .request()
-      .input("uuid", sql.NVarChar(36), uuid)
-      .query("SELECT * FROM scrobbler_users WHERE server_uuid = @uuid");
-    if (!result.recordset.length) return undefined;
-    return rowToRecord(result.recordset[0]);
+    return Array.from(this.users.values()).find((u) => u.serverUUID === uuid);
   }
 
   async getAll(): Promise<UserRecord[]> {
-    const result = await this.db
-      .request()
-      .query("SELECT * FROM scrobbler_users");
-    return result.recordset.map(rowToRecord);
+    return [...this.users.values()];
   }
 
   async removeByUUID(uuid: string): Promise<boolean> {
-    const result = await this.db
-      .request()
-      .input("uuid", sql.NVarChar(36), uuid)
-      .query("DELETE FROM scrobbler_users WHERE server_uuid = @uuid");
-    return (result.rowsAffected[0] ?? 0) > 0;
+    const user = await this.getByUUID(uuid);
+    if (user) {
+      this.users.delete(user.tachiUserId);
+      await this.save();
+      return true;
+    }
+    return false;
   }
 
   async upsert(record: UserRecord): Promise<void> {
-    await this.db
-      .request()
-      .input("tachiUserId",      sql.Int,           record.tachiUserId)
-      .input("tachiUsername",    sql.NVarChar(255),  record.tachiUsername)
-      .input("tachiToken",       sql.NVarChar(2000), record.tachiToken)
-      .input("lastfmSessionKey", sql.NVarChar(255),  record.lastfmSessionKey ?? null)
-      .input("lastfmUsername",   sql.NVarChar(255),  record.lastfmUsername ?? null)
-      .input("lastSyncedAt",     sql.BigInt,         record.lastSyncedAt)
-      .input("createdAt",        sql.NVarChar(50),   record.createdAt)
-      .input("serverUUID",       sql.NVarChar(36),   record.serverUUID)
-      .input("syncing",          sql.Bit,            record.syncing ? 1 : 0)
-      .query(`
-        MERGE scrobbler_users AS target
-        USING (SELECT @tachiUserId AS tachi_user_id) AS source
-          ON  target.tachi_user_id = source.tachi_user_id
-        WHEN MATCHED THEN UPDATE SET
-          tachi_username     = @tachiUsername,
-          tachi_token        = @tachiToken,
-          lastfm_session_key = @lastfmSessionKey,
-          lastfm_username    = @lastfmUsername,
-          last_synced_at     = @lastSyncedAt,
-          created_at         = @createdAt,
-          server_uuid        = @serverUUID,
-          syncing            = @syncing
-        WHEN NOT MATCHED THEN INSERT (
-          tachi_user_id, tachi_username, tachi_token,
-          lastfm_session_key, lastfm_username,
-          last_synced_at, created_at, server_uuid, syncing
-        ) VALUES (
-          @tachiUserId, @tachiUsername, @tachiToken,
-          @lastfmSessionKey, @lastfmUsername,
-          @lastSyncedAt, @createdAt, @serverUUID, @syncing
-        );
-      `);
+    this.users.set(record.tachiUserId, record);
+    await this.save();
   }
 
   async updateSyncState(tachiUserId: number, lastSyncedAt: number): Promise<void> {
-    const result = await this.db
-      .request()
-      .input("id",           sql.Int,    tachiUserId)
-      .input("lastSyncedAt", sql.BigInt, lastSyncedAt)
-      .query("UPDATE scrobbler_users SET last_synced_at = @lastSyncedAt WHERE tachi_user_id = @id");
-    if ((result.rowsAffected[0] ?? 0) === 0) {
-      throw new Error(`Unknown user ${tachiUserId}`);
-    }
+    const user = this.users.get(tachiUserId);
+    if (!user) throw new Error(`Unknown user ${tachiUserId}`);
+    user.lastSyncedAt = lastSyncedAt;
+    await this.save();
   }
 }
 
 export interface CreateUserStoreOptions {
-  sqlConnectionString?: string;
+  blobConnectionString?: string;
+  blobContainerName?: string;
+  blobName?: string;
   storageFile?: string;
 }
 
 export function createUserStore(options: CreateUserStoreOptions): IUserStore {
-  if (options.sqlConnectionString) {
-    console.log("[scrobbler] Azure SQL connection string found — using SqlUserStore");
-    return new SqlUserStore(options.sqlConnectionString);
+  if (options.blobConnectionString) {
+    const container = options.blobContainerName ?? "scrobbler";
+    const blob      = options.blobName          ?? "users.json";
+    console.log(`[scrobbler] Azure Blob connection string found — using BlobUserStore (${container}/${blob})`);
+    return new BlobUserStore(options.blobConnectionString, container, blob);
   }
   const file = options.storageFile ?? ".scrobbler-users.json";
-  console.log(`[scrobbler] No SQL connection string — falling back to file store (${file})`);
+  console.log(`[scrobbler] No Blob connection string — falling back to file store (${file})`);
   return new UserStore(file);
 }
 

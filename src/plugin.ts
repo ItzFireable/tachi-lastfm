@@ -18,7 +18,9 @@ export interface ScrobblerPluginConfig {
 
   intervalMs?: number;
 
-  sqlConnectionString?: string;
+  blobConnectionString?: string;
+  blobContainerName?: string;
+  blobName?: string;
   storageFile?: string;
 }
 
@@ -26,8 +28,10 @@ export function tachiScrobblerPlugin(config: ScrobblerPluginConfig) {
   const intervalMs = config.intervalMs ?? 5 * 60 * 1000;
 
   const store: IUserStore = createUserStore({
-    sqlConnectionString: config.sqlConnectionString,
-    storageFile: config.storageFile,
+    blobConnectionString: config.blobConnectionString,
+    blobContainerName:    config.blobContainerName,
+    blobName:             config.blobName,
+    storageFile:          config.storageFile,
   });
 
   const pendingLastfm = new Map<number, number>();
