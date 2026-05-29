@@ -36,30 +36,31 @@ export function tachiScrobblerPlugin(config: ScrobblerPluginConfig) {
     const users = (await store.getAll()).filter((u) => u.lastfmSessionKey);
     if (users.length === 0) return;
 
-    for (const user of users) {
-      try {
-        const result = await syncUser(
-          {
-            tachiToken: user.tachiToken,
-            tachiBaseUrl: config.tachiApiBaseUrl,
-            lastfmApiKey: config.lastfmApiKey,
-            lastfmApiSecret: config.lastfmApiSecret,
-            lastfmSessionKey: user.lastfmSessionKey!,
-          },
-          { lastSyncedAt: user.lastSyncedAt }
-        );
-
-        if (result.scrobbled > 0) {
-          console.log(
-            `[scrobbler] ${user.tachiUsername} → ${result.scrobbled} scrobbled, ${result.ignored} ignored across ${result.gamesChecked} game(s)`
+    await Promise.allSettled(
+      users.map(async (user) => {
+        try {
+          const result = await syncUser(
+            {
+              tachiToken: user.tachiToken,
+              tachiBaseUrl: config.tachiApiBaseUrl,
+              lastfmApiKey: config.lastfmApiKey,
+              lastfmApiSecret: config.lastfmApiSecret,
+              lastfmSessionKey: user.lastfmSessionKey!,
+            },
+            { lastSyncedAt: user.lastSyncedAt }
           );
+
+          if (result.scrobbled > 0) {
+            console.log(
+              `[scrobbler] ${user.tachiUsername} → ${result.scrobbled} scrobbled, ${result.ignored} ignored across ${result.gamesChecked} game(s)`
+            );
+          }
           await store.updateSyncState(user.tachiUserId, result.newState.lastSyncedAt);
+        } catch (err) {
+          console.error(`[scrobbler] Error syncing ${user.tachiUsername}:`, err);
         }
-      } catch (err) {
-        console.error(`[scrobbler] Error syncing ${user.tachiUsername}:`, err);
-        continue;
-      }
-    }
+      })
+    );
   }
 
   store.load().then(async () => {
