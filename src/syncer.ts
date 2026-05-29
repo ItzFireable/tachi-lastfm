@@ -76,6 +76,7 @@ async function tachiGetRecentScores(
 
   const json = (await res.json()) as TachiApiResponse<TachiRecentScoresBody>;
   if (!json.success) throw new Error(`Tachi error: ${json.description}`);
+
   return json.body;
 }
 
@@ -124,7 +125,7 @@ export async function lastfmScrobbleBatch(
 
   const res = await fetch("https://ws.audioscrobbler.com/2.0/", {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    headers: { "Content-Type": "application/x-www-form-urlencoded; charset=utf-8" },
     body: new URLSearchParams(params).toString(),
   });
 
@@ -145,6 +146,7 @@ export async function lastfmScrobbleBatch(
 export interface SyncResult {
   scrobbled: number;
   ignored: number;
+  old: number;
   gamesChecked: number;
   newState: UserSyncState;
 }
@@ -156,7 +158,7 @@ export async function syncUser(
   const games = await tachiGetAllGames(config.tachiToken, config.tachiBaseUrl);
 
   if (games.length === 0) {
-    return { scrobbled: 0, ignored: 0, gamesChecked: 0, newState: state };
+    return { scrobbled: 0, ignored: 0, old: 0, gamesChecked: 0, newState: state };
   }
 
   const perGameResults = await Promise.all(
@@ -176,6 +178,11 @@ export async function syncUser(
   const seen = new Set<string>();
   const allNewScores: Array<{ score: TachiScore; song: TachiSong | undefined }> = [];
 
+  const FOURTEEN_DAYS = 14 * 24 * 60 * 60 * 1000;
+  const cutoffTime = Date.now() - FOURTEEN_DAYS;
+
+  let oldScoreCount = 0;
+
   for (const result of perGameResults) {
     if (!result) continue;
     const songMap = new Map<number, TachiSong>(result.songs.map((s: TachiSong) => [s.id, s]));
@@ -185,13 +192,18 @@ export async function syncUser(
       if (score.timeAchieved <= state.lastSyncedAt) continue;
       if (seen.has(score.scoreID)) continue;
 
+      if (score.timeAchieved < cutoffTime) {
+        oldScoreCount++;
+        continue; 
+      }
+
       seen.add(score.scoreID);
       allNewScores.push({ score, song: songMap.get(score.songID) });
     }
   }
 
   if (allNewScores.length === 0) {
-    return { scrobbled: 0, ignored: 0, gamesChecked: games.length, newState: state };
+    return { scrobbled: 0, ignored: 0, old: oldScoreCount, gamesChecked: games.length, newState: state };
   }
   
   allNewScores.sort((a, b) => (a.score.timeAchieved as number) - (b.score.timeAchieved as number));
@@ -218,6 +230,7 @@ export async function syncUser(
   return {
     scrobbled: totalAccepted,
     ignored: totalIgnored,
+    old: oldScoreCount,
     gamesChecked: games.length,
     newState: { lastSyncedAt: newLastSyncedAt },
   };

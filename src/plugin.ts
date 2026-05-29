@@ -54,11 +54,9 @@ export function tachiScrobblerPlugin(config: ScrobblerPluginConfig) {
             { lastSyncedAt: user.lastSyncedAt }
           );
 
-          if (result.scrobbled > 0) {
-            console.log(
-              `[scrobbler] ${user.tachiUsername} → ${result.scrobbled} scrobbled, ${result.ignored} ignored across ${result.gamesChecked} game(s)`
-            );
-          }
+          console.log(
+            `[scrobbler] ${user.tachiUsername} → ${result.scrobbled} scrobbled, ${result.ignored} ignored, ${result.old} too old across ${result.gamesChecked} game(s)`
+          );
           await store.updateSyncState(user.tachiUserId, result.newState.lastSyncedAt);
         } catch (err) {
           console.error(`[scrobbler] Error syncing ${user.tachiUsername}:`, err);
