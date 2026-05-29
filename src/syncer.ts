@@ -3,7 +3,6 @@ import * as crypto from "crypto";
 export interface TachiGameStats {
   userID: number;
   game: string;
-  playtype: string;
 }
 
 export interface TachiScore {
@@ -49,8 +48,8 @@ export interface UserSyncConfig {
 async function tachiGetAllGames(
   tachiToken: string,
   tachiBaseUrl: string
-): Promise<Array<{ game: string; playtype: string }>> {
-  const url = `${tachiBaseUrl}/users/me/game-stats`;
+): Promise<Array<{ game: string }>> {
+  const url = `${tachiBaseUrl}/users/me/game-profiles`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${tachiToken}` },
   });
@@ -60,16 +59,15 @@ async function tachiGetAllGames(
   const json = (await res.json()) as TachiApiResponse<TachiGameStats[]>;
   if (!json.success) throw new Error(`Tachi error: ${json.description}`);
 
-  return json.body.map(({ game, playtype }) => ({ game, playtype }));
+  return json.body.map(({ game }) => ({ game }));
 }
 
 async function tachiGetRecentScores(
   tachiToken: string,
   tachiBaseUrl: string,
   game: string,
-  playtype: string
 ): Promise<TachiRecentScoresBody> {
-  const url = `${tachiBaseUrl}/users/me/games/${game}/${playtype}/scores/recent`;
+  const url = `${tachiBaseUrl}/users/me/games/${game}/scores/recent`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${tachiToken}` },
   });
@@ -162,13 +160,13 @@ export async function syncUser(
   }
 
   const perGameResults = await Promise.all(
-    games.map(({ game, playtype }) =>
-      tachiGetRecentScores(config.tachiToken, config.tachiBaseUrl, game, playtype).then((v: TachiRecentScoresBody) => {
+    games.map(({ game }) =>
+      tachiGetRecentScores(config.tachiToken, config.tachiBaseUrl, game).then((v: TachiRecentScoresBody) => {
         return v;
       })
       .catch(
         (err) => {
-          console.error(`[scrobbler] Failed to fetch ${game}/${playtype}: ${err.message}`);
+          console.error(`[scrobbler] Failed to fetch ${game}: ${err.message}`);
           return null;
         }
       )
